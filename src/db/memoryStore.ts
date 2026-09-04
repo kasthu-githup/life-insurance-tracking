@@ -1,4 +1,4 @@
-// In-memory fallback database for AI Studio environment when PostgreSQL / Cloud SQL is not connected
+// In-memory and browser-persistent fallback database for LifeTrack (works on AI Studio, Vercel, Netlify, and offline)
 import {
   UserProfile,
   Policy,
@@ -7,6 +7,7 @@ import {
   ReminderItem,
   DocumentItem,
   BeneficiaryItem,
+  DashboardData,
 } from '../types.ts';
 
 interface StoreState {
@@ -47,6 +48,48 @@ const state: StoreState = {
   },
 };
 
+const STORAGE_KEY = 'lifetrack_offline_db_v3';
+
+function saveToLocalStorage() {
+  if (typeof window === 'undefined') return;
+  try {
+    const serialized = {
+      users: Array.from(state.users.entries()),
+      policies: Array.from(state.policies.entries()),
+      expenses: Array.from(state.expenses.entries()),
+      payments: Array.from(state.payments.entries()),
+      reminders: Array.from(state.reminders.entries()),
+      documents: Array.from(state.documents.entries()),
+      beneficiaries: Array.from(state.beneficiaries.entries()),
+      nextId: state.nextId,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(serialized));
+  } catch {
+    // ignore quota/SSR errors
+  }
+}
+
+function loadFromLocalStorage() {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed.users) state.users = new Map(parsed.users);
+    if (parsed.policies) state.policies = new Map(parsed.policies);
+    if (parsed.expenses) state.expenses = new Map(parsed.expenses);
+    if (parsed.payments) state.payments = new Map(parsed.payments);
+    if (parsed.reminders) state.reminders = new Map(parsed.reminders);
+    if (parsed.documents) state.documents = new Map(parsed.documents);
+    if (parsed.beneficiaries) state.beneficiaries = new Map(parsed.beneficiaries);
+    if (parsed.nextId) state.nextId = parsed.nextId;
+  } catch (e) {
+    console.warn('Could not restore offline DB:', e);
+  }
+}
+
+loadFromLocalStorage();
+
 export const memoryStore = {
   // Users
   async getOrCreateUser(uid: string, email: string, fullName?: string): Promise<UserProfile> {
@@ -73,6 +116,7 @@ export const memoryStore = {
       createdAt: new Date().toISOString(),
     };
     state.users.set(uid, newUser);
+    saveToLocalStorage();
     return newUser;
   },
 
@@ -85,9 +129,11 @@ export const memoryStore = {
     if (!user) {
       const created = await this.getOrCreateUser(uid, data.email || '', data.fullName);
       Object.assign(created, data);
+      saveToLocalStorage();
       return created;
     }
     Object.assign(user, data);
+    saveToLocalStorage();
     return user;
   },
 
@@ -204,6 +250,7 @@ export const memoryStore = {
       });
     }
 
+    saveToLocalStorage();
     return newPolicy;
   },
 
@@ -211,6 +258,7 @@ export const memoryStore = {
     const policy = state.policies.get(id);
     if (!policy || policy.userId !== userId) return null;
     Object.assign(policy, data);
+    saveToLocalStorage();
     return policy;
   },
 
@@ -236,6 +284,7 @@ export const memoryStore = {
     }
 
     state.policies.delete(id);
+    saveToLocalStorage();
     return policy;
   },
 
@@ -311,6 +360,7 @@ export const memoryStore = {
     state.expenses.set(id, item);
 
     const policy = item.policyId ? state.policies.get(item.policyId) : undefined;
+    saveToLocalStorage();
     return {
       ...item,
       policyName: policy?.policyName,
@@ -323,6 +373,7 @@ export const memoryStore = {
     if (!expense || expense.userId !== userId) return null;
     Object.assign(expense, data);
     const policy = expense.policyId ? state.policies.get(expense.policyId) : undefined;
+    saveToLocalStorage();
     return {
       ...expense,
       policyName: policy?.policyName,
@@ -334,6 +385,7 @@ export const memoryStore = {
     const expense = state.expenses.get(id);
     if (!expense || expense.userId !== userId) return null;
     state.expenses.delete(id);
+    saveToLocalStorage();
     return expense;
   },
 
@@ -388,6 +440,7 @@ export const memoryStore = {
     state.payments.set(id, item);
 
     const policy = state.policies.get(item.policyId);
+    saveToLocalStorage();
     return {
       ...item,
       policyName: policy?.policyName,
@@ -436,6 +489,7 @@ export const memoryStore = {
     }
 
     const policy = state.policies.get(payment.policyId);
+    saveToLocalStorage();
     return {
       ...payment,
       policyName: policy?.policyName,
@@ -484,6 +538,7 @@ export const memoryStore = {
     };
     state.reminders.set(id, item);
     const policy = item.policyId ? state.policies.get(item.policyId) : undefined;
+    saveToLocalStorage();
     return {
       ...item,
       policyName: policy?.policyName,
@@ -495,6 +550,7 @@ export const memoryStore = {
     const reminder = state.reminders.get(id);
     if (!reminder || reminder.userId !== userId) return null;
     reminder.isRead = true;
+    saveToLocalStorage();
     return reminder;
   },
 
@@ -502,6 +558,7 @@ export const memoryStore = {
     const reminder = state.reminders.get(id);
     if (!reminder || reminder.userId !== userId) return null;
     reminder.isDismissed = true;
+    saveToLocalStorage();
     return reminder;
   },
 
@@ -509,6 +566,7 @@ export const memoryStore = {
     const reminder = state.reminders.get(id);
     if (!reminder || reminder.userId !== userId) return null;
     state.reminders.delete(id);
+    saveToLocalStorage();
     return reminder;
   },
 
@@ -557,6 +615,7 @@ export const memoryStore = {
     };
     state.documents.set(id, item);
     const policy = item.policyId ? state.policies.get(item.policyId) : undefined;
+    saveToLocalStorage();
     return {
       ...item,
       policyName: policy?.policyName,
@@ -568,7 +627,182 @@ export const memoryStore = {
     const document = state.documents.get(id);
     if (!document || document.userId !== userId) return null;
     state.documents.delete(id);
+    saveToLocalStorage();
     return document;
+  },
+
+  // Calculate complete Dashboard Data for client or server
+  async getDashboardData(userId: string): Promise<DashboardData> {
+    await this.seedUserDataIfEmpty(userId);
+    const userPolicies = await this.getPolicies(userId);
+    const userExpenses = await this.getExpenses(userId);
+    const userPayments = await this.getPayments(userId);
+    const userReminders = await this.getReminders(userId);
+
+    const totalExpenses = userExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+    const now = new Date();
+    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+    const paidThisMonth = userExpenses
+      .filter((e) => e.expenseDate && e.expenseDate.startsWith(currentMonthPrefix) && e.paymentStatus === 'Paid')
+      .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+    const upcomingPayments = userPayments.filter((p) => p.status === 'Upcoming');
+    const upcomingPremiumsAmount = upcomingPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+
+    const overduePayments = userPayments.filter((p) => p.status === 'Overdue');
+    const overduePremiumsAmount = overduePayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+
+    const activePolicies = userPolicies.filter((p) => p.status === 'Active');
+
+    const annualInsuranceCost = activePolicies.reduce((sum, p) => {
+      const amt = p.premiumAmount || 0;
+      switch (p.premiumFrequency) {
+        case 'Monthly':
+          return sum + amt * 12;
+        case 'Quarterly':
+          return sum + amt * 4;
+        case 'Half-Yearly':
+          return sum + amt * 2;
+        case 'Yearly':
+        default:
+          return sum + amt;
+      }
+    }, 0);
+
+    const directExpenses = userExpenses.filter((e) => e.expenseType === 'Direct');
+    const indirectExpenses = userExpenses.filter((e) => e.expenseType === 'Indirect');
+
+    const directTotal = directExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+    const indirectTotal = indirectExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthlyTrend: Record<string, { direct: number; indirect: number; total: number; label: string }> = {};
+
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const label = `${monthNames[d.getMonth()]} ${d.getFullYear().toString().slice(2)}`;
+      monthlyTrend[key] = { direct: 0, indirect: 0, total: 0, label };
+    }
+
+    userExpenses.forEach((exp) => {
+      if (exp.expenseDate && exp.expenseDate.length >= 7) {
+        const key = exp.expenseDate.substring(0, 7);
+        if (monthlyTrend[key]) {
+          const amt = exp.amount || 0;
+          if (exp.expenseType === 'Direct') {
+            monthlyTrend[key].direct += amt;
+          } else {
+            monthlyTrend[key].indirect += amt;
+          }
+          monthlyTrend[key].total += amt;
+        }
+      }
+    });
+
+    const policyWiseMap: Record<string, number> = {};
+    userExpenses.forEach((e) => {
+      const name = e.policyName || 'General (Indirect)';
+      policyWiseMap[name] = (policyWiseMap[name] || 0) + (e.amount || 0);
+    });
+
+    const policyWiseExpenses = Object.entries(policyWiseMap).map(([name, amount]) => ({
+      name,
+      amount,
+    }));
+
+    return {
+      summary: {
+        totalExpenses,
+        paidThisMonth,
+        upcomingPremiumsCount: upcomingPayments.length,
+        upcomingPremiumsAmount,
+        overdueCount: overduePayments.length,
+        overdueAmount: overduePremiumsAmount,
+        activePoliciesCount: activePolicies.length,
+        totalPoliciesCount: userPolicies.length,
+        annualInsuranceCost,
+      },
+      directVsIndirect: {
+        directTotal,
+        indirectTotal,
+        directPercentage: totalExpenses > 0 ? Math.round((directTotal / totalExpenses) * 100) : 0,
+        indirectPercentage: totalExpenses > 0 ? Math.round((indirectTotal / totalExpenses) * 100) : 0,
+      },
+      monthlyChart: Object.values(monthlyTrend),
+      policyWiseExpenses,
+      upcomingPayments: userPayments.slice(0, 5),
+      activePolicies: activePolicies.slice(0, 4),
+      reminders: userReminders.slice(0, 5),
+    };
+  },
+
+  // Calculate complete Reports Data
+  async getReportsData(userId: string): Promise<any> {
+    await this.seedUserDataIfEmpty(userId);
+    const allExpenses = await this.getExpenses(userId);
+    const allPolicies = await this.getPolicies(userId);
+
+    const direct = allExpenses.filter((e) => e.expenseType === 'Direct');
+    const indirect = allExpenses.filter((e) => e.expenseType === 'Indirect');
+
+    const totalExpenses = allExpenses.reduce((s, e) => s + (e.amount || 0), 0);
+    const directTotal = direct.reduce((s, e) => s + (e.amount || 0), 0);
+    const indirectTotal = indirect.reduce((s, e) => s + (e.amount || 0), 0);
+
+    const categoryBreakdown: Record<string, { count: number; total: number; type: string }> = {};
+    allExpenses.forEach((e) => {
+      const cat = e.category || 'Other';
+      if (!categoryBreakdown[cat]) {
+        categoryBreakdown[cat] = { count: 0, total: 0, type: e.expenseType };
+      }
+      categoryBreakdown[cat].count++;
+      categoryBreakdown[cat].total += e.amount || 0;
+    });
+
+    const policyBreakdown: Record<string, { count: number; total: number; company: string }> = {};
+    allExpenses.forEach((e) => {
+      const pName = e.policyName || 'General / Unallocated';
+      if (!policyBreakdown[pName]) {
+        policyBreakdown[pName] = { count: 0, total: 0, company: e.companyName || 'N/A' };
+      }
+      policyBreakdown[pName].count++;
+      policyBreakdown[pName].total += e.amount || 0;
+    });
+
+    const monthlyBreakdown: Record<string, { month: string; direct: number; indirect: number; total: number }> = {};
+    allExpenses.forEach((e) => {
+      const m = e.expenseDate ? e.expenseDate.substring(0, 7) : 'Unknown';
+      if (!monthlyBreakdown[m]) {
+        monthlyBreakdown[m] = { month: m, direct: 0, indirect: 0, total: 0 };
+      }
+      if (e.expenseType === 'Direct') {
+        monthlyBreakdown[m].direct += e.amount || 0;
+      } else {
+        monthlyBreakdown[m].indirect += e.amount || 0;
+      }
+      monthlyBreakdown[m].total += e.amount || 0;
+    });
+
+    return {
+      summary: {
+        totalExpenses,
+        directTotal,
+        indirectTotal,
+        policyCount: allPolicies.length,
+        expenseCount: allExpenses.length,
+      },
+      categoryBreakdown: Object.entries(categoryBreakdown).map(([category, data]) => ({
+        category,
+        ...data,
+      })),
+      policyBreakdown: Object.entries(policyBreakdown).map(([policyName, data]) => ({
+        policyName,
+        ...data,
+      })),
+      monthlyBreakdown: Object.values(monthlyBreakdown).sort((a, b) => b.month.localeCompare(a.month)),
+    };
   },
 
   // Seed user data if empty
@@ -836,5 +1070,7 @@ export const memoryStore = {
       uploadDate: '2022-09-20',
       notes: 'Full body medical checkup and TMT results approved',
     });
+
+    saveToLocalStorage();
   },
 };

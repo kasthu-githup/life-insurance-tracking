@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { auth, googleAuthProvider } from '../lib/firebase.ts';
 import { signInWithPopup, signOut, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { UserProfile } from '../types.ts';
+import { memoryStore } from '../db/memoryStore.ts';
 
 interface AuthContextType {
   user: { uid: string; email: string; name: string } | null;
@@ -25,7 +26,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
-  // Sync token and user with backend
+  // Sync token and user with backend or local persistent store
   const syncWithBackend = async (idToken: string, fallbackName?: string, email?: string) => {
     try {
       const res = await fetch('/api/auth/sync', {
@@ -39,13 +40,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           email: email || undefined,
         }),
       });
-      if (res.ok) {
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
-        setProfile(data.user);
+        if (data.user) {
+          setProfile(data.user);
+          return;
+        }
       }
-    } catch (err) {
-      console.error('Failed to sync auth with backend:', err);
+    } catch {
+      // Backend not running (e.g. Vercel static deployment)
     }
+
+    // Client-side fallback: ensure user profile exists in memoryStore
+    let uid = 'kasthuri';
+    if (idToken.startsWith('demo-token-')) uid = idToken.replace('demo-token-', '');
+    else if (idToken.startsWith('google-token-b64:')) {
+      try {
+        const json = decodeURIComponent(escape(atob(idToken.replace('google-token-b64:', ''))));
+        const parsed = JSON.parse(json);
+        if (parsed.uid) uid = parsed.uid;
+      } catch {}
+    } else if (idToken.startsWith('google-token-')) uid = idToken.replace('google-token-', '');
+
+    const localUser = await memoryStore.getOrCreateUser(
+      uid,
+      email || `${uid}@example.com`,
+      fallbackName || 'Kasthuri Selvaraj'
+    );
+    await memoryStore.seedUserDataIfEmpty(uid, fallbackName || 'Kasthuri Selvaraj');
+    setProfile(localUser);
   };
 
   const refreshProfile = async () => {
@@ -54,13 +78,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const res = await fetch('/api/profile', {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.ok) {
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
         setProfile(data);
+        return;
       }
-    } catch (err) {
-      console.error('Failed to refresh profile:', err);
+    } catch {
+      // Backend not running
     }
+
+    let uid = 'kasthuri';
+    if (token.startsWith('demo-token-')) uid = token.replace('demo-token-', '');
+    else if (token.startsWith('google-token-')) uid = token.replace('google-token-', '');
+    const p = await memoryStore.getUserProfile(uid);
+    if (p) setProfile(p);
   };
 
   useEffect(() => {
